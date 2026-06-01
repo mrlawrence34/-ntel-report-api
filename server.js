@@ -2,6 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const Parser = require('rss-parser');
 
+// Environment variables
+const GNEWS_KEY = process.env.GNEWS_KEY || "";
+const NEWSDATA_KEY = process.env.NEWSDATA_KEY || "";
+
 const app = express();
 const parser = new Parser();
 
