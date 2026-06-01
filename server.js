@@ -2,89 +2,81 @@ const express = require('express');
 const cors = require('cors');
 const Parser = require('rss-parser');
 
-// Environment variables
-const GNEWS_KEY = process.env.GNEWS_KEY || "";
-const NEWSDATA_KEY = process.env.NEWSDATA_KEY || "";
-
 const app = express();
-const parser = new Parser();
+const parser = new Parser({ timeout: 10000 });
 
 app.use(cors());
 app.use(express.json());
 
 const RSS_SOURCES = [
   { id: "bbc", name: "BBC News", url: "https://feeds.bbci.co.uk/news/world/rss.xml", cat: "war", region: "Global" },
-  { id: "reuters", name: "Reuters", url: "https://feeds.reuters.com/reuters/topNews", cat: "war", region: "Global" },
-  { id: "aljazeera", name: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml", cat: "war", region: "Global" },
   { id: "dw", name: "DW News", url: "https://rss.dw.com/rdf/rss-en-world", cat: "war", region: "Global" },
-  { id: "apnews", name: "AP News", url: "https://feeds.apnews.com/apf-topnews", cat: "war", region: "Global" },
+  { id: "aljazeera", name: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml", cat: "war", region: "Global" },
   { id: "guardian", name: "The Guardian", url: "https://www.theguardian.com/world/rss", cat: "global", region: "Global" },
-  { id: "ntv", name: "NTV", url: "https://www.ntv.com.tr/son-dakika-haberleri.rss", cat: "turkey", region: "Türkiye" },
-  { id: "hurriyet", name: "Hürriyet", url: "https://www.hurriyet.com.tr/rss/anasayfa", cat: "turkey", region: "Türkiye" },
+  { id: "ap", name: "AP News", url: "https://feeds.apnews.com/apf-topnews", cat: "war", region: "Global" },
+  { id: "sky", name: "Sky News", url: "https://feeds.skynews.com/feeds/rss/world.xml", cat: "war", region: "Global" },
+  { id: "rt", name: "RT News", url: "https://www.rt.com/rss/news/", cat: "war", region: "Global" },
+  { id: "euronews", name: "Euronews", url: "https://www.euronews.com/rss", cat: "global", region: "Avrupa" },
 ];
 
-// Cache
 let cache = { data: [], lastFetch: null };
-const CACHE_DURATION = 3 * 60 * 1000; // 3 dakika
+const CACHE_MS = 3 * 60 * 1000;
+
+function getPriority(title) {
+  const t = (title || '').toLowerCase();
+  if (t.match(/war|attack|strike|killed|bomb|nuclear|missile|crisis|breaking|urgent/)) return "critical";
+  if (t.match(/conflict|military|troops|explosion|threat|death|shooting/)) return "high";
+  return "medium";
+}
 
 async function fetchAllNews() {
   const allItems = [];
-  
-  for (const src of RSS_SOURCES) {
+  const promises = RSS_SOURCES.map(async (src) => {
     try {
       const feed = await parser.parseURL(src.url);
-      feed.items.slice(0, 15).forEach((item, i) => {
-        allItems.push({
-          id: `${src.id}-${i}-${Date.now()}`,
-          title: item.title || "",
-          summary: (item.contentSnippet || item.content || item.summary || "").slice(0, 200),
-          source: src.name,
-          sourceId: src.id,
-          cat: src.cat,
-          region: src.region,
-          lang: "en",
-          pubDate: item.pubDate || item.isoDate || new Date().toISOString(),
-          link: item.link || "",
-          status: "new",
-          priority: getPriority(item.title || ""),
-          tags: [],
-        });
-      });
+      return feed.items.slice(0, 15).map((item, i) => ({
+        id: `${src.id}-${i}-${Date.now()}`,
+        title: item.title || "",
+        summary: (item.contentSnippet || item.summary || "").replace(/<[^>]+>/g, "").slice(0, 200),
+        source: src.name,
+        sourceId: src.id,
+        cat: src.cat,
+        region: src.region,
+        lang: "en",
+        pubDate: item.isoDate || item.pubDate || new Date().toISOString(),
+        link: item.link || "",
+        status: "new",
+        priority: getPriority(item.title),
+        tags: [],
+      }));
     } catch (e) {
-      console.log(`${src.name} hatası:`, e.message);
+      console.log(`${src.name} hata:`, e.message);
+      return [];
     }
-  }
+  });
 
+  const results = await Promise.allSettled(promises);
+  results.forEach(r => { if (r.status === 'fulfilled') allItems.push(...r.value); });
   allItems.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
   return allItems;
 }
 
-function getPriority(title) {
-  const t = title.toLowerCase();
-  if (t.match(/war|attack|strike|killed|bomb|nuclear|missile|crisis|urgent|breaking/)) return "critical";
-  if (t.match(/conflict|military|troops|explosion|threat|sanctions|death/)) return "high";
-  return "medium";
-}
-
-// Ana haber endpoint
 app.get('/api/news', async (req, res) => {
   try {
     const now = Date.now();
-    if (cache.data.length > 0 && cache.lastFetch && (now - cache.lastFetch) < CACHE_DURATION) {
+    if (cache.data.length > 0 && cache.lastFetch && (now - cache.lastFetch) < CACHE_MS) {
       return res.json({ success: true, data: cache.data, cached: true, count: cache.data.length });
     }
-
     const news = await fetchAllNews();
-    cache = { data: news, lastFetch: now };
-    res.json({ success: true, data: news, cached: false, count: news.length });
+    if (news.length > 0) cache = { data: news, lastFetch: now };
+    res.json({ success: true, data: cache.data, cached: false, count: cache.data.length });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', cached: cache.data.length, lastFetch: cache.lastFetch });
+  res.json({ status: 'ok', count: cache.data.length, lastFetch: cache.lastFetch });
 });
 
 const PORT = process.env.PORT || 3001;
